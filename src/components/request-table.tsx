@@ -1,355 +1,359 @@
-"use client"
+"use client";
 
-import type { RequestData, ResponseType, Department, ComplianceStatus, StatusType } from '@/lib/types';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Calendar } from "@/components/ui/calendar";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Calendar as CalendarIcon, Trash2, Mail, Bell } from 'lucide-react';
-import { format, isValid, parseISO } from 'date-fns';
-import { cn, parseDate } from "@/lib/utils";
-import { useState } from 'react';
+import { useState, useEffect, useRef, type ChangeEvent, type FormEvent } from "react";
+import { useToast } from "@/hooks/use-toast";
+import type { RequestData } from "@/lib/types";
+import { calculateDueDate, getComplianceStatus, readFileAsDataURL, calculateBusinessDays, addBusinessDays, parseDate, format } from "@/lib/utils";
+import { extractPdfData } from "@/ai/flows/extract-pdf-data";
+import { Logo } from "@/components/logo";
+import { SummaryCards } from "@/components/summary-cards";
+import { RequestTable } from "@/components/request-table";
+import { UserProfile } from "@/components/user-profile";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Loader2, Upload, Search, ArrowDownUp, Download } from "lucide-react";
+import { useAuth } from "@/context/auth-context";
 
-interface RequestTableProps {
-  requests: RequestData[];
-  updateRequest: (id: string, newValues: Partial<RequestData>) => void;
-  deleteRequest: (id: string) => void;
-  isReadOnly: boolean;
-}
+type SortDirection = 'asc' | 'desc';
 
-const responseTypes: ResponseType[] = ['En revisión', 'Derivación'];
-const departments: Department[] = ['Jurídica', 'Personas', 'Operaciones', 'Finanzas', 'Informática', 'Comunicaciones', 'Of. Partes'];
-const statusTypes: StatusType[] = ['Entregada', 'Derivada', 'Denegada', 'Desistida'];
+export function DashboardPage() {
+  const { user, loading } = useAuth();
+  const [requests, setRequests] = useState<RequestData[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [displayedRequests, setDisplayedRequests] = useState<RequestData[]>([]);
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-const ComplianceDot = ({ status }: { status?: ComplianceStatus }) => {
-  const statusConfig = {
-    green: { color: 'bg-green-500', label: 'En plazo' },
-    red: { color: 'bg-red-500', label: 'Vencido' },
+  // Load from localStorage on initial mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+        try {
+            const storedRequests = localStorage.getItem('requests');
+            if (storedRequests) {
+                setRequests(JSON.parse(storedRequests).map((req: any) => ({
+                    ...req,
+                    cierre: req.cierre ? new Date(req.cierre) : undefined,
+                    fechaVencimientoActualizada: req.fechaVencimientoActualizada ? new Date(req.fechaVencimientoActualizada) : undefined,
+                    fechaEnvio: req.fechaEnvio ? new Date(req.fechaEnvio) : undefined,
+                    fechaEnvioDepto: req.fechaEnvioDepto ? new Date(req.fechaEnvioDepto) : undefined,
+                })));
+            }
+        } catch (error) {
+            console.error("Failed to parse requests from localStorage on initial load", error);
+        }
+    }
+  }, []);
+
+
+  // Save to localStorage whenever requests change
+  useEffect(() => {
+    if (user?.role === 'Auditor') return;
+    try {
+      localStorage.setItem('requests', JSON.stringify(requests));
+    } catch (error) {
+      console.error("Failed to save requests to localStorage", error);
+    }
+  }, [requests, user]);
+
+
+  useEffect(() => {
+    const getRequestNumber = (solicitud: string): number => {
+      if (!solicitud || typeof solicitud !== 'string') {
+        return 0;
+      }
+      const match = solicitud.match(/\d+/g);
+      if (!match) return 0;
+      return parseInt(match[match.length - 1], 10);
+    };
+
+    let sorted = [...requests];
+    
+    sorted.sort((a, b) => {
+        const aNum = getRequestNumber(a.numeroSolicitud);
+        const bNum = getRequestNumber(b.numeroSolicitud);
+        
+        if (sortDirection === 'asc') {
+            return aNum - bNum;
+        } else {
+            return bNum - aNum;
+        }
+    });
+
+    let filtered = sorted;
+    if (filter) {
+        filtered = sorted.filter(req =>
+            Object.values(req).some(val =>
+                String(val).toLowerCase().includes(filter.toLowerCase())
+            )
+        );
+    }
+    
+    setDisplayedRequests(filtered);
+}, [requests, filter, sortDirection]);
+
+  const handleSort = () => {
+    setSortDirection(prev => (prev === 'desc' ? 'asc' : 'desc'));
   };
-  
-  if (!status || !statusConfig[status]) {
-    return <span className="text-muted-foreground text-xs">N/A</span>;
-  }
 
-  return (
-    <div className="flex items-center gap-2">
-      <div className={`h-3 w-3 rounded-full ${statusConfig[status].color}`} />
-      <span className="hidden md:inline">{statusConfig[status].label}</span>
-    </div>
-  );
-};
+  const updateRequest = (id: string, newValues: Partial<RequestData>) => {
+    setRequests(prev => prev.map(req => {
+      if (req.id === id) {
+        const originalReq = { ...req };
+        const updatedReq = { ...req, ...newValues };
+        
+        if (newValues.tipoRespuesta === 'Derivación') {
+            updatedReq.departamentoResponsable = 'Of. Partes';
+        }
 
-const DatePickerCell = ({ date, onUpdate, isReadOnly }: { date?: Date | string | null, onUpdate: (date: Date | null) => void, isReadOnly: boolean }) => {
-  const [open, setOpen] = useState(false);
-  
-  const dateValue = date ? (date instanceof Date ? date : parseDate(String(date))) : null;
-  const [inputValue, setInputValue] = useState(dateValue && isValid(dateValue) ? format(dateValue, 'dd/MM/yyyy') : '');
+        if ('fechaEnvioDepto' in newValues) {
+            const baseDate = updatedReq.fechaEnvioDepto ? (typeof updatedReq.fechaEnvioDepto === 'string' ? parseDate(updatedReq.fechaEnvioDepto) : updatedReq.fechaEnvioDepto as Date) : null;
+            if(baseDate) {
+              updatedReq.fechaVencimientoActualizada = calculateDueDate(baseDate);
+            } else {
+              updatedReq.fechaVencimientoActualizada = undefined;
+            }
+        }
+        
+        if ('oposicion' in newValues || 'subsanacion' in newValues || 'prorroga' in newValues || 'fechaEnvio' in newValues) {
+          const baseDate = updatedReq.fechaEnvio ? (typeof updatedReq.fechaEnvio === 'string' ? parseDate(updatedReq.fechaEnvio) : updatedReq.fechaEnvio as Date) : null;
+      
+          if (baseDate) {
+              let extraDays = 0;
+              if (updatedReq.oposicion) extraDays += 3;
+              if (updatedReq.subsanacion) extraDays += 5;
+              if (updatedReq.prorroga) extraDays += 10;
+              
+              if (extraDays > 0) {
+                  const newDueDate = addBusinessDays(baseDate, extraDays);
+                  updatedReq.fechaVencimientoModificada = format(newDueDate, 'dd/MM/yyyy');
+              } else {
+                  updatedReq.fechaVencimientoModificada = undefined;
+              }
+          } else {
+              updatedReq.fechaVencimientoModificada = undefined;
+          }
+        }
+        
+        if ('cierre' in newValues && newValues.cierre) {
+            const parsedCierre = newValues.cierre instanceof Date ? newValues.cierre : (typeof newValues.cierre === 'string' ? parseDate(newValues.cierre) : null);
+            if (parsedCierre && !isNaN(parsedCierre.getTime())) {
+              updatedReq.dias = calculateBusinessDays(updatedReq.fechaIngreso, parsedCierre);
+              if (updatedReq.dias !== undefined) {
+                updatedReq.complianceStatus = getComplianceStatus(updatedReq.dias);
+              }
+            } else {
+              updatedReq.dias = undefined;
+              updatedReq.complianceStatus = undefined;
+            }
+        } else if ('cierre' in newValues && !newValues.cierre) {
+            updatedReq.dias = undefined;
+            updatedReq.complianceStatus = undefined;
+        }
 
-  const handleManualChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setInputValue(e.target.value);
-    const parsedDate = parseDate(e.target.value);
-    if (parsedDate && isValid(parsedDate)) {
-      onUpdate(parsedDate);
-    } else if (e.target.value === '') {
-      onUpdate(null);
+        return updatedReq;
+      }
+      return req;
+    }));
+  };
+
+  const deleteRequest = (id: string) => {
+    setRequests(prev => prev.filter(req => req.id !== id));
+    toast({
+      title: "Solicitud eliminada",
+      description: "La solicitud ha sido eliminada de la tabla.",
+    });
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    try {
+      const pdfDataUri = await readFileAsDataURL(file);
+      const extractedData = await extractPdfData({ pdfDataUri });
+
+      const newRequest: RequestData = {
+        id: crypto.randomUUID(),
+        ...extractedData,
+        pdfDataUri: pdfDataUri,
+        tipoRespuesta: 'En revisión',
+        oposicion: false,
+        subsanacion: false,
+        prorroga: false,
+        etiqueta: '',
+      };
+
+      setRequests(prev => [newRequest, ...prev]);
+      toast({
+        title: "Éxito",
+        description: "Datos extraídos del PDF y agregados a la tabla.",
+        variant: "default",
+      });
+    } catch (error) {
+      console.error("Error extracting PDF data:", error);
+      toast({
+        title: "Error de Extracción",
+        description: "No se pudieron extraer los datos del PDF. Por favor, inténtalo de nuevo.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+      if(fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     }
   };
 
-  const handleSelectDate = (selectedDate?: Date) => {
-    if (selectedDate) {
-      onUpdate(selectedDate);
-      setInputValue(format(selectedDate, 'dd/MM/yyyy'));
-    } else {
-      onUpdate(null);
-      setInputValue('');
+  const handleDownloadReport = () => {
+    if (displayedRequests.length === 0) {
+      toast({
+        title: "No hay datos para exportar",
+        description: "Cargue solicitudes antes de descargar el reporte.",
+        variant: "destructive",
+      });
+      return;
     }
-    setOpen(false);
-  }
 
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild disabled={isReadOnly}>
-            <div className="relative">
-                <Input 
-                    value={inputValue}
-                    onChange={handleManualChange}
-                    onBlur={() => {
-                        const parsedDate = parseDate(inputValue);
-                        if (!parsedDate || !isValid(parsedDate)) {
-                           onUpdate(null);
-                           setInputValue('');
-                        }
-                    }}
-                    placeholder="dd/MM/yyyy"
-                    className={cn("w-[150px] h-8", !dateValue && "text-muted-foreground")}
-                    readOnly={isReadOnly}
-                />
-                <CalendarIcon className="absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-            </div>
-        </PopoverTrigger>
-        <PopoverContent className="w-auto p-0">
-            <Calendar
-                mode="single"
-                selected={dateValue && isValid(dateValue) ? dateValue : undefined}
-                onSelect={handleSelectDate}
-                initialFocus
-            />
-        </PopoverContent>
-    </Popover>
-  );
-};
+    const headers = [
+      "N° Solicitud", "Nombre y Apellidos", "Etiqueta", "Fecha Ingreso", "Vencimiento",
+      "Tipo Respuesta", "Responsable", "Envío Depto.", "Entrega Depto.", "Oposición", "Subsanación", "Prórroga", "Fecha Envío",
+      "Estado", "Cierre", "Días", "Cumplimiento"
+    ];
 
-export function RequestTable({ requests, updateRequest, deleteRequest, isReadOnly }: RequestTableProps) {
-  if (requests.length === 0) {
+    const formatForCsv = (value: any) => {
+      if (value === null || value === undefined) return '';
+      if (value instanceof Date) return format(value, 'dd/MM/yyyy');
+      
+      const stringValue = String(value);
+      if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+        return `"${stringValue.replace(/"/g, '""')}"`;
+      }
+      return stringValue;
+    };
+
+    const csvContent = [
+      headers.join(','),
+      ...displayedRequests.map(req => [
+        formatForCsv(req.numeroSolicitud),
+        formatForCsv(req.nombreApellido),
+        formatForCsv(req.etiqueta),
+        formatForCsv(req.fechaIngreso),
+        formatForCsv(req.fechaVencimientoModificada || req.fechaVencimientoInicial),
+        formatForCsv(req.tipoRespuesta),
+        formatForCsv(req.departamentoResponsable),
+        req.fechaEnvioDepto ? format(new Date(req.fechaEnvioDepto), 'dd/MM/yyyy') : '',
+        req.fechaVencimientoActualizada ? format(new Date(req.fechaVencimientoActualizada), 'dd/MM/yyyy') : '',
+        formatForCsv(req.oposicion ? 'Sí' : 'No'),
+        formatForCsv(req.subsanacion ? 'Sí' : 'No'),
+        formatForCsv(req.prorroga ? 'Sí' : 'No'),
+        req.fechaEnvio ? format(new Date(req.fechaEnvio), 'dd/MM/yyyy') : '',
+        formatForCsv(req.estado),
+        req.cierre ? format(new Date(req.cierre), 'dd/MM/yyyy') : '',
+        formatForCsv(req.dias),
+        formatForCsv(req.complianceStatus),
+      ].join(','))
+    ].join('\n');
+
+    const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'reporte_solicitudes.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    toast({
+        title: "Reporte generado",
+        description: "La descarga de su reporte ha comenzado.",
+    });
+  };
+  
+  if (loading) {
     return (
-      <div className="text-center py-16 text-muted-foreground">
-        <p className="font-semibold">No hay solicitudes cargadas</p>
-        <p className="text-sm mt-1">Sube un PDF para comenzar a extraer datos.</p>
-      </div>
+        <div className="flex items-center justify-center min-h-screen">
+            <Loader2 className="h-16 w-16 animate-spin text-primary" />
+        </div>
     );
   }
 
-  const generateMailtoLink = (req: RequestData, isReminder: boolean): string => {
-    if (!req.departamentoResponsable || req.tipoRespuesta !== 'En revisión') return '';
-    
-    const departmentEmailMap: Record<Department, string> = {
-        'Jurídica': 'ftrejo@atta.gov.cl',
-        'Personas': 'jastudillo@atta.gov.cl',
-        'Operaciones': 'ivillablanca@atta.gov.cl',
-        'Finanzas': 'ovasquez@atta.gov.cl',
-        'Informática': 'kbrito@atta.gov.cl',
-        'Comunicaciones': 'fgonzalez@atta.gov.cl',
-        'Of. Partes': 'ofpartes@atta.gov.cl',
-    };
-    
-    const to = departmentEmailMap[req.departamentoResponsable];
-    
-    const entregaDeptoDate = req.fechaVencimientoActualizada 
-        ? (req.fechaVencimientoActualizada instanceof Date ? req.fechaVencimientoActualizada : (typeof req.fechaVencimientoActualizada === 'string' ? parseISO(req.fechaVencimientoActualizada) : new Date(req.fechaVencimientoActualizada)))
-        : null;
-
-    const fechaEntrega = entregaDeptoDate && isValid(entregaDeptoDate) ? format(entregaDeptoDate, 'dd/MM/yyyy') : '[Fecha no disponible]';
-
-    let subject: string;
-    let body: string;
-
-    if (isReminder) {
-        subject = `Recordatorio: Colaboración en Solicitud de Acceso a la Información - ${req.numeroSolicitud}`;
-        body = `Estimado(a),\n\nJunto con saludar, escribo para recordarte que el plazo original para la entrega ha vencido, y tu colaboración es fundamental para que podamos dar respuesta a tiempo. Agradecemos mucho tu ayuda.\n\nNúmero de Solicitud: ${req.numeroSolicitud}\n\nQuedo a tu disposición para lo que necesites.\n\nSaludos cordiales.`;
-    } else {
-        subject = `Nueva Solicitud de Acceso a la Información Asignada - ${req.numeroSolicitud}`;
-        body = `Estimado(a),\n\nJunto con saludar, informo que el usuario Felipe González Parraguez, Encargado de Comunicaciones, Transparencia y Participación Ciudadana, le ha enviado una Solicitud de Acceso a la Información para colaborar con la respuesta.\n\nSe ruega entregar la información para dar respuesta, a más tardar, el ${fechaEntrega}.\n\nNúmero de Solicitud: ${req.numeroSolicitud}\n\nSaludos cordiales.`;
-    }
-
-    return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  };
-
+  if (!user) return null;
+  const isAuditor = user.role === 'Auditor';
 
   return (
-    <div className="overflow-x-auto">
-      <Table className="min-w-full whitespace-nowrap">
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-[220px]">N° Solicitud</TableHead>
-            <TableHead>Nombre y Apellidos</TableHead>
-            <TableHead className="w-[180px]">Etiqueta</TableHead>
-            <TableHead>Fecha Ingreso</TableHead>
-            <TableHead>Vencimiento</TableHead>
-            <TableHead>Tipo Respuesta</TableHead>
-            <TableHead>Responsable</TableHead>
-            <TableHead>Envío Depto.</TableHead>
-            <TableHead>Entrega Depto.</TableHead>
-            <TableHead>Oposición</TableHead>
-            <TableHead>Subsanación</TableHead>
-            <TableHead>Prórroga</TableHead>
-            <TableHead>Envío</TableHead>
-            <TableHead>Estado</TableHead>
-            <TableHead>Cierre</TableHead>
-            <TableHead>Días</TableHead>
-            <TableHead>Cumplimiento</TableHead>
-            <TableHead className="w-[120px] text-right">Acción</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {requests.map((req) => {
-            const vencimientoActualizadaDate = req.fechaVencimientoActualizada 
-                ? (req.fechaVencimientoActualizada instanceof Date ? req.fechaVencimientoActualizada : (typeof req.fechaVencimientoActualizada === 'string' ? parseISO(req.fechaVencimientoActualizada) : new Date(req.fechaVencimientoActualizada)))
-                : null;
-            const mailtoLink = generateMailtoLink(req, false);
-            const reminderMailtoLink = generateMailtoLink(req, true);
-
-            return (
-            <TableRow key={req.id}>
-              <TableCell>
-                <Input
-                  defaultValue={req.numeroSolicitud}
-                  onBlur={(e) => updateRequest(req.id, { numeroSolicitud: e.target.value })}
-                  className="h-8"
-                  readOnly={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>
-                <Input
-                  defaultValue={req.nombreApellido}
-                  onBlur={(e) => updateRequest(req.id, { nombreApellido: e.target.value })}
-                  className="h-8"
-                  readOnly={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>
-                <Input
-                  defaultValue={req.etiqueta}
-                  onBlur={(e) => updateRequest(req.id, { etiqueta: e.target.value })}
-                  className="h-8"
-                  placeholder="Añadir etiqueta"
-                  readOnly={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>{req.fechaIngreso}</TableCell>
-              <TableCell className={cn(req.fechaVencimientoModificada && "text-red-500 font-bold")}>
-                {req.fechaVencimientoModificada || req.fechaVencimientoInicial}
-              </TableCell>
-              <TableCell>
-                <Select
-                  value={req.tipoRespuesta}
-                  onValueChange={(value: ResponseType) => updateRequest(req.id, { tipoRespuesta: value })}
-                  disabled={isReadOnly}
-                >
-                  <SelectTrigger className="h-8">
-                    <SelectValue placeholder="Seleccionar..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {responseTypes.map(type => (
-                      <SelectItem key={type} value={type}>{type}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </TableCell>
-              <TableCell>
-                {req.tipoRespuesta === 'En revisión' ? (
-                  <Select
-                    value={req.departamentoResponsable}
-                    onValueChange={(value: Department) => updateRequest(req.id, { departamentoResponsable: value })}
-                    disabled={isReadOnly}
-                  >
-                    <SelectTrigger className="h-8">
-                      <SelectValue placeholder="Seleccionar..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {departments.map(dept => (
-                        <SelectItem key={dept} value={dept}>{dept}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  req.tipoRespuesta === 'Derivación' ? (
-                    <span>{req.departamentoResponsable}</span>
-                  ) : (
-                    <span className="text-muted-foreground text-xs">No aplica</span>
-                  )
-                )}
-              </TableCell>
-              <TableCell>
-                {req.tipoRespuesta === 'En revisión' || req.tipoRespuesta === 'Derivación' ? (
-                  <DatePickerCell 
-                    date={req.fechaEnvioDepto}
-                    onUpdate={(date) => updateRequest(req.id, { fechaEnvioDepto: date })}
-                    isReadOnly={isReadOnly}
+    <div className="min-h-screen flex flex-col">
+      <header className="p-4 md:p-6 flex justify-between items-start">
+        <Logo />
+        <UserProfile />
+      </header>
+      <main className="flex-grow p-4 md:p-6 space-y-6">
+        <SummaryCards requests={requests} />
+        
+        <Card className="shadow-lg">
+          <CardHeader>
+            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+              <CardTitle>Gestión de Solicitudes</CardTitle>
+              <div className="flex items-center gap-2 w-full md:w-auto flex-wrap">
+                <div className="relative flex-grow">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input 
+                    placeholder="Filtrar solicitudes..." 
+                    className="pl-9"
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
                   />
-                ) : <span className="text-muted-foreground text-xs">No aplica</span>}
-              </TableCell>
-              <TableCell>
-                {vencimientoActualizadaDate && isValid(vencimientoActualizadaDate) ? format(vencimientoActualizadaDate, 'dd/MM/yyyy') : 'N/A'}
-              </TableCell>
-              <TableCell>
-                <Checkbox
-                  checked={!!req.oposicion}
-                  onCheckedChange={(checked) => updateRequest(req.id, { oposicion: !!checked })}
-                  disabled={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>
-                <Checkbox
-                  checked={!!req.subsanacion}
-                  onCheckedChange={(checked) => updateRequest(req.id, { subsanacion: !!checked })}
-                  disabled={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>
-                <Checkbox
-                  checked={!!req.prorroga}
-                  onCheckedChange={(checked) => updateRequest(req.id, { prorroga: !!checked })}
-                  disabled={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>
-                <DatePickerCell 
-                  date={req.fechaEnvio}
-                  onUpdate={(date) => updateRequest(req.id, { fechaEnvio: date })}
-                  isReadOnly={isReadOnly}
-                />
-              </TableCell>
-              <TableCell>
-                <Select
-                    value={req.estado}
-                    onValueChange={(value: StatusType) => updateRequest(req.id, { estado: value })}
-                    disabled={isReadOnly}
-                >
-                    <SelectTrigger className="h-8">
-                        <SelectValue placeholder="Seleccionar..."/>
-                    </SelectTrigger>
-                    <SelectContent>
-                        {statusTypes.map(type => (
-                            <SelectItem key={type} value={type}>{type}</SelectItem>
-                        ))}
-                    </SelectContent>
-                </Select>
-              </TableCell>
-              <TableCell>
-                <DatePickerCell 
-                  date={req.cierre}
-                  onUpdate={(date) => updateRequest(req.id, { cierre: date })}
-                  isReadOnly={isReadOnly}
-                />
-              </TableCell>
-               <TableCell>
-                {req.dias !== undefined ? req.dias : 'N/A'}
-              </TableCell>
-              <TableCell>
-                <ComplianceDot status={req.complianceStatus} />
-              </TableCell>
-              <TableCell className="text-right">
-                <div className="flex justify-end items-center gap-1">
-                  {!isReadOnly && (
-                    <>
-                      {mailtoLink && (
-                        <a href={mailtoLink} target="_blank" rel="noopener noreferrer">
-                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Enviar correo de asignación">
-                            <Mail className="h-4 w-4 text-primary" />
-                          </Button>
-                        </a>
-                      )}
-                      {reminderMailtoLink && (
-                        <a href={reminderMailtoLink} target="_blank" rel="noopener noreferrer">
-                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Enviar recordatorio">
-                            <Bell className="h-4 w-4 text-yellow-500" />
-                          </Button>
-                        </a>
-                      )}
-                      <Button variant="ghost" size="icon" onClick={() => deleteRequest(req.id)} className="h-8 w-8" title="Eliminar solicitud">
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
-                    </>
-                  )}
                 </div>
-              </TableCell>
-            </TableRow>
-          )})}
-        </TableBody>
-      </Table>
+                <Button variant="outline" onClick={handleSort}>
+                    <ArrowDownUp className="mr-2 h-4 w-4" />
+                    Ordenar ({sortDirection === 'desc' ? 'Desc' : 'Asc'})
+                </Button>
+                <Button onClick={handleDownloadReport}>
+                    <Download className="mr-2 h-4 w-4" />
+                    Descargar Reporte
+                </Button>
+                {!isAuditor && (
+                  <form onSubmit={(e: FormEvent) => e.preventDefault()}>
+                    <Button onClick={() => fileInputRef.current?.click()} disabled={isLoading} className="bg-accent hover:bg-accent/90">
+                      {isLoading ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Upload className="mr-2 h-4 w-4" />
+                      )}
+                      Cargar PDF
+                    </Button>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileChange}
+                      className="hidden"
+                      accept="application/pdf"
+                      disabled={isLoading}
+                    />
+                  </form>
+                )}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <RequestTable 
+              requests={displayedRequests}
+              updateRequest={updateRequest}
+              deleteRequest={deleteRequest}
+              isReadOnly={isAuditor}
+            />
+          </CardContent>
+        </Card>
+      </main>
+      <footer className="text-center p-4 text-sm text-muted-foreground">
+        © {new Date().getFullYear()} Ministerio de Hacienda. Todos los derechos reservados.
+      </footer>
     </div>
   );
 }
+
+    
