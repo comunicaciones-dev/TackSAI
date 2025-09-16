@@ -50,12 +50,13 @@ export function DashboardPage() {
 
   // Save to localStorage whenever requests change
   useEffect(() => {
+    if (user?.role === 'Auditor') return;
     try {
       localStorage.setItem('requests', JSON.stringify(requests));
     } catch (error) {
       console.error("Failed to save requests to localStorage", error);
     }
-  }, [requests]);
+  }, [requests, user]);
 
 
   useEffect(() => {
@@ -354,3 +355,5 @@ export function DashboardPage() {
     </div>
   );
 }
+
+    
