@@ -26,66 +26,30 @@ export function DashboardPage() {
   const [displayedRequests, setDisplayedRequests] = useState<RequestData[]>([]);
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const isInitialMount = useRef(true);
 
+  // Load from localStorage on initial mount
   useEffect(() => {
-    const handleStorageChange = (event: StorageEvent) => {
-      if (event.key === 'requests' && event.newValue) {
+    if (typeof window !== 'undefined') {
         try {
-          const newRequests = JSON.parse(event.newValue).map((req: any) => ({
-            ...req,
-            cierre: req.cierre ? new Date(req.cierre) : undefined,
-            fechaVencimientoActualizada: req.fechaVencimientoActualizada ? new Date(req.fechaVencimientoActualizada) : undefined,
-            fechaEnvio: req.fechaEnvio ? new Date(req.fechaEnvio) : undefined,
-            fechaEnvioDepto: req.fechaEnvioDepto ? new Date(req.fechaEnvioDepto) : undefined,
-          }));
-          setRequests(newRequests);
+            const storedRequests = localStorage.getItem('requests');
+            if (storedRequests) {
+                setRequests(JSON.parse(storedRequests).map((req: any) => ({
+                    ...req,
+                    cierre: req.cierre ? new Date(req.cierre) : undefined,
+                    fechaVencimientoActualizada: req.fechaVencimientoActualizada ? new Date(req.fechaVencimientoActualizada) : undefined,
+                    fechaEnvio: req.fechaEnvio ? new Date(req.fechaEnvio) : undefined,
+                    fechaEnvioDepto: req.fechaEnvioDepto ? new Date(req.fechaEnvioDepto) : undefined,
+                })));
+            }
         } catch (error) {
-          console.error("Failed to parse requests from storage event", error);
+            console.error("Failed to parse requests from localStorage on initial load", error);
         }
-      }
-    };
-
-    window.addEventListener('storage', handleStorageChange);
-
-    return () => {
-      window.removeEventListener('storage', handleStorageChange);
-    };
-  }, []);
-
-  useEffect(() => {
-    try {
-      const storedRequests = localStorage.getItem('requests');
-      if (storedRequests) {
-        let parsedRequests: RequestData[] = JSON.parse(storedRequests).map((req: any) => ({
-          ...req,
-          cierre: req.cierre ? new Date(req.cierre) : undefined,
-          fechaVencimientoActualizada: req.fechaVencimientoActualizada ? new Date(req.fechaVencimientoActualizada) : undefined,
-          fechaEnvio: req.fechaEnvio ? new Date(req.fechaEnvio) : undefined,
-          fechaEnvioDepto: req.fechaEnvioDepto ? new Date(req.fechaEnvioDepto) : undefined,
-        }));
-
-        const correctedRequests = parsedRequests.map(req => {
-          if (req.tipoRespuesta === 'Derivación') {
-            return { ...req, departamentoResponsable: 'Of. Partes' };
-          }
-          return req;
-        });
-
-        setRequests(correctedRequests);
-      }
-    } catch (error) {
-      console.error("Failed to parse requests from localStorage", error);
     }
   }, []);
 
+
+  // Save to localStorage whenever requests change
   useEffect(() => {
-    if (isInitialMount.current) {
-        if (requests.length > 0) {
-            isInitialMount.current = false;
-        }
-        return;
-    }
     try {
       localStorage.setItem('requests', JSON.stringify(requests));
     } catch (error) {
@@ -99,10 +63,9 @@ export function DashboardPage() {
       if (!solicitud || typeof solicitud !== 'string') {
         return 0;
       }
-      // Extracts the last sequence of digits from the string
-      const match = solicitud.match(/\d+$/);
+      const match = solicitud.match(/\d+/g);
       if (!match) return 0;
-      return parseInt(match[0], 10);
+      return parseInt(match[match.length - 1], 10);
     };
 
     let sorted = [...requests];
@@ -391,3 +354,5 @@ export function DashboardPage() {
     </div>
   );
 }
+
+    
