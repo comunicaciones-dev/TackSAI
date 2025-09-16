@@ -99,9 +99,10 @@ export function DashboardPage() {
       if (!solicitud || typeof solicitud !== 'string') {
         return 0;
       }
-      const match = solicitud.match(/\d+/g);
+      // Extracts the last sequence of digits from the string
+      const match = solicitud.match(/\d+$/);
       if (!match) return 0;
-      return parseInt(match[match.length - 1], 10);
+      return parseInt(match[0], 10);
     };
 
     let sorted = [...requests];
